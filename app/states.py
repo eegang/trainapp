@@ -4,7 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class Form(StatesGroup):
-    """Шаги диалогов."""
+    """Шаги диалогов общего меню."""
 
     weight = State()          # ввод веса
     meals_date = State()      # выбор дня для приёма пищи
@@ -13,9 +13,8 @@ class Form(StatesGroup):
 
 
 class Work(StatesGroup):
-    """Шаги блока «Рабочее время»."""
+    """Шаги блока рабочего времени."""
 
-    manual_date = State()     # за какой день пишем
-    manual_value = State()    # длительность + заметка
-    norm_day = State()        # норма часов в день
-    norm_week = State()       # норма часов в неделю
+    manual_date = State()     # за какой день пишем часы
+    manual_value = State()    # ввод количества часов
+    rate = State()            # ввод часовой ставки

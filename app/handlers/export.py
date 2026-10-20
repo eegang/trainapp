@@ -8,11 +8,9 @@ from aiogram.fsm.context import FSMContext
 
 from app import prefs
 from app.dates import today
-from app.duration import minutes_since
 from app.keyboards import main_keyboard
 from app.report import build_report, build_today_summary
 from db.repository import (
-    get_active_work,
     get_exercises_for_date,
     get_meals_calories,
     get_report_data,
@@ -34,7 +32,7 @@ async def export_data(message: types.Message, state: FSMContext) -> None:
     report = build_report(
         data,
         days=30,
-        work_hours_per_day=await prefs.get_work_hours_per_day(user_id),
+        hourly_rate=await prefs.get_hourly_rate(user_id),
     )
 
     temp_path = ""
@@ -61,16 +59,13 @@ async def today_data(message: types.Message, state: FSMContext) -> None:
     await state.clear()
 
     user_id = message.from_user.id
-    active = await get_active_work(user_id)
-
     summary = build_today_summary(
         weight=await get_user_weight(user_id),
         calories=await get_meals_calories(user_id, today()),
         exercises=await get_exercises_for_date(user_id, today()),
         is_sleeping=await has_active_sleep(user_id),
         work_minutes=await get_work_by_date(user_id, today()),
-        work_hours_per_day=await prefs.get_work_hours_per_day(user_id),
-        active_work_minutes=minutes_since(active["start_time"]) if active else None,
+        hourly_rate=await prefs.get_hourly_rate(user_id),
     )
 
     await message.answer(f"{summary}\nВыберите другое действие:", reply_markup=main_keyboard())

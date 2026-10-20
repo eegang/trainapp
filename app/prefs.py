@@ -1,66 +1,41 @@
 """Настройки пользователя поверх таблицы settings (ключ-значение).
 
-Единый доступ к значениям по умолчанию, чтобы цифры не размножались по коду.
-Новые настройки для будущих привычек добавляются сюда одной строкой.
+Новая настройка добавляется одной константой — миграция схемы не нужна,
+`db/schema.py` дописывает только колонки таблиц, а значения лежат в паре
+ключ-значение.
 """
 
 from __future__ import annotations
 
 from db.repository import get_setting, set_setting
 
-#: Норма рабочих часов в день.
-WORK_HOURS_PER_DAY = "work_hours_per_day"
-#: Норма рабочих часов в неделю.
-WORK_HOURS_PER_WEEK = "work_hours_per_week"
+#: Часовая ставка, за которую считается заработок.
+HOURLY_RATE = "hourly_rate"
 
-_DEFAULTS = {
-    WORK_HOURS_PER_DAY: 8.0,
-    WORK_HOURS_PER_WEEK: 40.0,
-}
-
-_BOUNDS = {
-    WORK_HOURS_PER_DAY: (0.5, 24.0),
-    WORK_HOURS_PER_WEEK: (1.0, 168.0),
-}
+#: Допустимые границы ставки (за час).
+RATE_BOUNDS = (0.01, 10_000_000.0)
 
 
-async def get_number(user_id: int, key: str) -> float:
-    """Числовое значение настройки или значение по умолчанию."""
-    raw = await get_setting(user_id, key)
+async def get_hourly_rate(user_id: int) -> float | None:
+    """Ставка пользователя или None, если он её ещё не указал."""
+    raw = await get_setting(user_id, HOURLY_RATE)
     if raw is None:
-        return _DEFAULTS[key]
+        return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
-        return _DEFAULTS[key]
+        return None
+    return value if value > 0 else None
 
 
-async def set_number(user_id: int, key: str, value: float) -> tuple[bool, float]:
-    """Сохраняет число в пределах допуска.
+async def set_hourly_rate(user_id: int, rate: float) -> tuple[bool, float]:
+    """Сохраняет ставку в разумных границах.
 
-    Возвращает ``(принято, сохранённое_значение)``. Если значение вне
-    диапазона — не сохраняет и возвращает ``False``.
+    Возвращает ``(принято, значение)``: при выходе за границы — не сохраняет
+    и возвращает ``False``, чтобы хендлер мог переспросить.
     """
-    low, high = _BOUNDS[key]
-    if not low <= value <= high:
-        return False, value
-    await set_setting(user_id, key, str(value))
-    return True, value
-
-
-def default_of(key: str) -> float:
-    """Значение по умолчанию (для текстов в подсказках)."""
-    return _DEFAULTS[key]
-
-
-def bounds_of(key: str) -> tuple[float, float]:
-    """Допустимый диапазон настройки."""
-    return _BOUNDS[key]
-
-
-async def get_work_hours_per_day(user_id: int) -> float:
-    return await get_number(user_id, WORK_HOURS_PER_DAY)
-
-
-async def get_work_hours_per_week(user_id: int) -> float:
-    return await get_number(user_id, WORK_HOURS_PER_WEEK)
+    low, high = RATE_BOUNDS
+    if not low <= rate <= high:
+        return False, rate
+    await set_setting(user_id, HOURLY_RATE, str(rate))
+    return True, rate

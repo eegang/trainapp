@@ -17,7 +17,6 @@ import os
 import sqlite3
 import sys
 import tempfile
-from datetime import date, datetime, timedelta
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,13 +27,16 @@ if TEST_DB.exists():
     TEST_DB.unlink()
 os.environ["DB_PATH"] = str(TEST_DB)
 
-from aiogram import types                                    # noqa: E402
-from aiogram.client.session.base import BaseSession          # noqa: E402
+import config                                                   # noqa: E402
+import db.repository as repository                              # noqa: E402
+import db.schema as schema_module                               # noqa: E402
+from aiogram import types                                       # noqa: E402
+from aiogram.client.session.base import BaseSession             # noqa: E402
 
-from app import handlers as app_handlers                    # noqa: E402
-from app.bot import bot, dp                                 # noqa: E402
-from app.dates import (                                     # noqa: E402
-    human_date,
+from app import handlers as app_handlers                         # noqa: E402
+from app import money                                           # noqa: E402
+from app.bot import bot, dp                                      # noqa: E402
+from app.dates import (                                          # noqa: E402
     month_range,
     parse_user_date,
     today,
@@ -42,16 +44,16 @@ from app.dates import (                                     # noqa: E402
     working_days_between,
     yesterday,
 )
-from app.duration import (                                  # noqa: E402
+from app.duration import (                                       # noqa: E402
+    format_hours,
     format_minutes,
-    format_short_hours,
     parse_duration,
     parse_hours,
-    percent,
-    progress_bar,
+    parse_hours_and_note,
 )
-from app.report import build_report, build_today_summary    # noqa: E402
-from db.schema import init_db                                # noqa: E402
+from app.handlers.payout import month_title                      # noqa: E402
+from app.report import build_report, build_today_summary         # noqa: E402
+from db.schema import init_db                                    # noqa: E402
 
 USER_SEQ = iter(range(900_000_000, 900_999_999))
 
@@ -88,7 +90,7 @@ class Harness:
         bot.session = self.session
         self._update_id = 0
 
-    def _mark(self) -> int:
+    def mark(self) -> int:
         return len(self.session.sent)
 
     async def say(self, user_id: int, text: str) -> None:
@@ -131,7 +133,6 @@ class Harness:
         )
 
     def since(self, mark: int) -> list[str]:
-        """Тексты ответов бота, начиная с метки."""
         return [text for _, text in self.session.sent[mark:] if text is not None]
 
     def last(self, mark: int) -> str:
@@ -150,6 +151,11 @@ def db_all(sql: str, params: tuple = ()) -> list[tuple]:
         conn.close()
 
 
+def db_one(sql: str, params: tuple = ()):  # noqa: ANN201
+    rows = db_all(sql, params)
+    return rows[0] if rows else None
+
+
 def db_write(sql: str, params: tuple = ()) -> None:
     """Прямая запись в тестовую базу (для подготовки данных)."""
     conn = sqlite3.connect(TEST_DB)
@@ -165,11 +171,6 @@ def db_count(sql: str, params: tuple = ()) -> int:
     return int(row[0]) if row else 0
 
 
-def db_one(sql: str, params: tuple = ()):  # noqa: ANN201
-    rows = db_all(sql, params)
-    return rows[0] if rows else None
-
-
 # ---------- отчёт о результатах ----------
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -181,9 +182,9 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         print(f"FAIL  {name}  {detail}")
 
 
-async def unit_tests() -> None:
-    """Юниты на разбор строк и арифметику периодов."""
-    print("\n— парсеры и даты")
+async def test_parsers() -> None:
+    """Юниты на разбор строк, даты и деньги."""
+    print("\n— парсеры, даты, деньги")
 
     duration_cases = [
         ("8", (480, "")),
@@ -201,24 +202,48 @@ async def unit_tests() -> None:
         ("25:00", (None, "")),
     ]
     for text, expected in duration_cases:
-        check(f"parse_duration({text!r})", parse_duration(text) == expected, str(parse_duration(text)))
+        got = parse_duration(text)
+        check(f"parse_duration({text!r})", got == expected, str(got))
+
+    # часы: голое число — это ВСЕГДА часы, а не минуты
+    hours_cases = [
+        ("8", (8.0, "")),
+        ("8,5", (8.5, "")),
+        ("30", (30.0, "")),
+        ("8:30", (8.5, "")),
+        ("8ч30", (8.5, "")),
+        ("480мин", (8.0, "")),
+        ("8 закрыл год", (8.0, "закрыл год")),
+        ("8:30 закрывал год", (8.5, "закрывал год")),
+        ("abc", (None, "")),
+        ("", (None, "")),
+        ("15.10.2026", (None, "")),
+    ]
+    for text, expected in hours_cases:
+        got = parse_hours_and_note(text)
+        check(f"parse_hours_and_note({text!r})", got == expected, str(got))
 
     check("parse_hours('8ч30')", parse_hours("8ч30") == 8.5, str(parse_hours("8ч30")))
     check("parse_hours с заметкой отклонён", parse_hours("8 30") is None, str(parse_hours("8 30")))
-    # голое число в вопросе про норму — это часы, а не минуты
-    check("parse_hours('30') = 30 часов", parse_hours("30") == 30.0, str(parse_hours("30")))
-    check("parse_hours('7,5')", parse_hours("7,5") == 7.5, str(parse_hours("7,5")))
-    check("parse_hours('480мин')", parse_hours("480мин") == 8.0, str(parse_hours("480мин")))
-    check("parse_hours('15.10.2026') отклонён", parse_hours("15.10.2026") is None, str(parse_hours("15.10.2026")))
-    check("format_minutes", [format_minutes(m) for m in (0, 45, 480, 510)] == ["0 мин", "45 мин", "8 ч", "8 ч 30 мин"])
-    check("format_short_hours", format_short_hours(510) == "8,5 ч", format_short_hours(510))
-    check("percent от нуля", percent(100, 0) == 0)
-    check("progress_bar", progress_bar(50, 100) == "▓▓▓▓▓░░░░░", progress_bar(50, 100))
-    check("progress_bar перелёт", progress_bar(200, 100) == "▓▓▓▓▓▓▓▓▓▓", progress_bar(200, 100))
+    check("format_minutes", [format_minutes(m) for m in (0, 45, 480, 510)]
+          == ["0 мин", "45 мин", "8 ч", "8 ч 30 мин"])
+    check("format_hours", format_hours(8.5) == "8,5 ч", format_hours(8.5))
+
+    money_cases = [(75825.0, "75 825"), (1234.5, "1 234,5"), (0.01, "0,01"),
+                   (10000000, "10 000 000"), (25.5, "25,5"), (None, "—")]
+    for value, expected in money_cases:
+        check(f"format_money({value})", money.format_money(value) == expected,
+              money.format_money(value))
+
+    check("parse_rate('850')", money.parse_rate("850") == 850.0, str(money.parse_rate("850")))
+    check("parse_rate('850,5')", money.parse_rate("850,5") == 850.5, str(money.parse_rate("850,5")))
+    check("parse_rate('0') отклонён", money.parse_rate("0") is None)
+    check("parse_rate('abc') отклонён", money.parse_rate("abc") is None)
+    check("earnings", money.earnings(8.5, 850) == 7225.0, str(money.earnings(8.5, 850)))
+    check("earnings без ставки", money.earnings(8.5, None) is None)
 
     check("today", parse_user_date("сегодня") == today())
     check("вчера", parse_user_date("вчера") == yesterday())
-    check("дата без года", parse_user_date("20.10") == today() if date.today().day >= 20 else True)
     check("невалидная дата", parse_user_date("31.02") is None)
     check("недата", parse_user_date("абракадабра") is None)
     check("неделя с понедельника", week_range()[0] <= today() <= week_range()[1])
@@ -230,16 +255,17 @@ async def test_legacy_flows(h: Harness) -> None:
     print("\n— существующие разделы (регрессия)")
 
     uid = next(USER_SEQ)
-    mark = h._mark()
+    mark = h.mark()
     await h.say(uid, "/start")
     check("старт: меню показана", "Выберите действие" in h.last(mark), h.last(mark))
 
-    mark = h._mark()
+    mark = h.mark()
     await h.say(uid, "Вес на сегодня")
     await h.say(uid, "81,4")
-    check("вес сохранён", db_one("SELECT current_weight FROM users WHERE user_id=?", (uid,))[0] == 81.4)
+    check("вес сохранён в users.weight",
+          db_one("SELECT weight FROM users WHERE user_id=?", (uid,))[0] == 81.4)
+    check("ответ про вес", "Вес 81.4 кг сохранён" in h.last(mark), h.last(mark))
 
-    mark = h._mark()
     await h.say(uid, "Приемы пищи")
     await h.say(uid, "Вчера")
     await h.say(uid, "300")
@@ -249,259 +275,174 @@ async def test_legacy_flows(h: Harness) -> None:
         "SELECT COUNT(*) FROM meals WHERE user_id=? AND date=?", (uid, today())
     ) == 0)
 
-    mark = h._mark()
     await h.say(uid, "Показатели упражнений")
     await h.say(uid, "грудь 10x3")
     check("упражнение сохранено",
           db_one("SELECT description FROM exercises WHERE user_id=?", (uid,))[0] == "грудь 10x3")
 
     await h.say(uid, "Я сплю")
-    check("сон открыт", db_one("SELECT COUNT(*) FROM sleep WHERE user_id=? AND end_time IS NULL", (uid,))[0] == 1)
+    check("сон открыт", db_count(
+        "SELECT COUNT(*) FROM sleep WHERE user_id=? AND end_time IS NULL", (uid,)
+    ) == 1)
     await h.say(uid, "Я проснулся")
     check("сон закрыт", db_one("SELECT duration_min FROM sleep WHERE user_id=?", (uid,))[0] is not None)
 
-    mark = h._mark()
+    mark = h.mark()
     await h.say(uid, "Выгрузить данные за 30 дней")
     check("файл отчёта отправлен", "SendDocument" in h.names(mark), str(h.names(mark)))
 
-
-async def test_work_timer(h: Harness) -> None:
-    """Таймер рабочего времени."""
-    print("\n— рабочее время: таймер")
-
-    uid = next(USER_SEQ)
-    mark = h._mark()
-    await h.say(uid, "Рабочее время")
-    check("меню открылось", "Рабочее время" in h.last(mark), h.last(mark))
-    check("меню: сейчас не на работе", "не на работе" in h.last(mark), h.last(mark))
-
-    mark = h._mark()
-    await h.say(uid, "▶ Начать работу")
-    check("сессия создана", db_one(
-        "SELECT COUNT(*) FROM work_sessions WHERE user_id=? AND end_time IS NULL AND start_time IS NOT NULL", (uid,)
-    )[0] == 1)
-
-    mark = h._mark()
-    await h.say(uid, "▶ Начать работу")
-    check("двойной старт отклонён", "уже идёт" in h.last(mark), h.last(mark))
-    check("вторая сессия не создана", db_one(
-        "SELECT COUNT(*) FROM work_sessions WHERE user_id=?", (uid,)
-    )[0] == 1)
-
-    mark = h._mark()
-    await h.say(uid, "■ Завершить работу")
-    saved = db_one("SELECT duration_min, end_time FROM work_sessions WHERE user_id=?", (uid,))
-    check("сессия закрыта", saved[1] is not None and saved[0] is not None, str(saved))
-    check("итог показан", "Смена закрыта" in h.last(mark), h.last(mark))
-
-    mark = h._mark()
-    await h.say(uid, "■ Завершить работу")
-    check("повторное завержение вежливое", "Нет активной сессии" in h.last(mark), h.last(mark))
-
-
-async def test_work_long_session(h: Harness) -> None:
-    """Забытая сессия: бот не должен молча записывать сутки."""
-    print("\n— рабочее время: забытая сессия")
-
-    uid = next(USER_SEQ)
-    old = (datetime.now() - timedelta(hours=30)).strftime("%Y-%m-%d %H:%M:%S")
-    db_write(
-        "INSERT INTO work_sessions (user_id, date, start_time, source) "
-        "VALUES (?, date('now','localtime'), ?, 'timer')",
-        (uid, old),
-    )
-
-    mark = h._mark()
-    await h.say(uid, "Рабочее время")
-    await h.say(uid, "■ Завершить работу")
+    mark = h.mark()
+    await h.say(uid, "Данные за сегодня")
     text = h.last(mark)
-    check("длинная сессия требует подтверждения", "забыли" in text and "закрыть" in text, text)
-    check("сессия НЕ закрыта заранее",
-          db_count("SELECT COUNT(*) FROM work_sessions WHERE user_id=? AND end_time IS NULL", (uid,)) == 1)
-
-    session_id = db_one("SELECT id FROM work_sessions WHERE user_id=?", (uid,))[0]
-
-    await h.tap(uid, f"work_long_save:{session_id}")
-    check("сохранено по подтверждению",
-          db_one("SELECT end_time FROM work_sessions WHERE id=?", (session_id,))[0] is not None)
-
-    # второй вариант: забытую сессию можно выбросить
-    other = next(USER_SEQ)
-    db_write(
-        "INSERT INTO work_sessions (user_id, date, start_time, source) "
-        "VALUES (?, date('now','localtime'), ?, 'timer')",
-        (other, old),
-    )
-    drop_id = db_one("SELECT id FROM work_sessions WHERE user_id=?", (other,))[0]
-    await h.say(other, "■ Завершить работу")
-    await h.tap(other, f"work_long_drop:{drop_id}")
-    check("забытую сессию можно удалить", db_count("SELECT COUNT(*) FROM work_sessions WHERE id=?", (drop_id,)) == 0)
+    check("сводка за сегодня работает", "Данные за" in text and "Вес: 81.4 кг" in text, text[:200])
+    check("сводка содержит рабочее время", "Рабочее время: 0 мин" in text, text[:300])
 
 
-async def test_work_manual(h: Harness) -> None:
-    """Ручная запись: кнопки, дата с клавиатуры, заметка, ошибки."""
-    print("\n— рабочее время: ручная запись")
+async def test_work_entry(h: Harness) -> None:
+    """Ручная запись часов: даты, форматы, замена, обнуление."""
+    print("\n— рабочее время: запись часов")
 
     uid = next(USER_SEQ)
-    mark = h._mark()
-    await h.say(uid, "Записать вручную")
-    check("спрашивает день", "За какой день" in h.last(mark), h.last(mark))
+
+    mark = h.mark()
+    await h.say(uid, "Рабочее время")
+    check("сразу спрашивает день", "За какой день" in h.last(mark), h.last(mark))
 
     await h.say(uid, "Сегодня")
-    mark = h._mark()
+    mark = h.mark()
     await h.say(uid, "8:30 закрывал год")
-    row = db_one("SELECT date, duration_min, note, source FROM work_sessions WHERE user_id=?", (uid,))
-    check("ручная запись сохранена", row is not None and row[1] == 510 and row[3] == "manual", str(row))
-    check("заметка распознана", row[2] == "закрывал год", str(row[2]))
-    check("привязка к сегодняшнему дню", row[0] == today(), str(row[0]))
-    check("итог показан", "Записано" in h.last(mark), h.last(mark))
+    row = db_one("SELECT date, duration_min, note FROM work_days WHERE user_id=?", (uid,))
+    check("часы записаны", row is not None and row[1] == 510, str(row))
+    check("привязка к дате", row[0] == today(), str(row[0]))
+    check("заметка сохранена", row[2] == "закрывал год", str(row[2]))
+    text = h.last(mark)
+    check("показан итог месяца", "Октябрь" in text or month_title(today()[:7]) in text, text)
+    check("упоминание про ставку", "ставка" in text.lower(), text)
 
-    await h.say(uid, "Записать вручную")
-    await h.say(uid, "Вчера")
-    await h.say(uid, "7")
-    check("запись за вчера", db_one(
-        "SELECT COUNT(*) FROM work_sessions WHERE user_id=? AND date=?", (uid, yesterday())
-    )[0] == 1)
-
-    await h.say(uid, "Записать вручную")
-    mark = h._mark()
-    await h.say(uid, "15.10.2026")
-    check("понимает дату с клавиатуры", "15.10.2026" in h.last(mark), h.last(mark))
-    await h.say(uid, "6")
-    check("запись на введённую дату", db_one(
-        "SELECT COUNT(*) FROM work_sessions WHERE user_id=? AND date=?", (uid, "2026-10-15")
-    )[0] == 1)
-
-    await h.say(uid, "Записать вручную")
+    # повторный ввод за тот же день заменяет значение, а не добавляет строку
+    await h.say(uid, "Рабочее время")
+    mark = h.mark()
     await h.say(uid, "Сегодня")
-    before = db_count("SELECT COUNT(*) FROM work_sessions WHERE user_id=?", (uid,))
-    mark = h._mark()
-    await h.say(uid, "много работы")
-    check("кривая длительность -> переспрос", "Не похоже на длительность" in h.last(mark), h.last(mark))
+    check("предупреждает, что день уже заполнен",
+          "уже записано 8 ч 30 мин" in h.last(mark) and "заменится" in h.last(mark), h.last(mark))
 
-    # состояние не сброшено: следом можно дописать значение
-    await h.say(uid, "6,5")
-    check("после ошибки ввод продолжился",
-          db_count("SELECT COUNT(*) FROM work_sessions WHERE user_id=? AND duration_min=390", (uid,)) == 1)
-    check("ничего лишнего не записалось",
-          db_count("SELECT COUNT(*) FROM work_sessions WHERE user_id=?", (uid,)) == before + 1)
+    mark = h.mark()
+    await h.say(uid, "9")
+    check("значение заменено",
+          db_one("SELECT duration_min FROM work_days WHERE user_id=?", (uid,))[0] == 540)
+    check("строка одна", db_count("SELECT COUNT(*) FROM work_days WHERE user_id=?", (uid,)) == 1)
+    check("показано прежнее значение", "было 8 ч 30 мин" in h.last(mark), h.last(mark))
+    check("заметка обновлена (пусто)",
+          db_one("SELECT note FROM work_days WHERE user_id=?", (uid,))[0] is None)
 
-    await h.say(uid, "Записать вручную")
-    mark = h._mark()
+    # дата с клавиатуры и за вчерашний день
+    await h.say(uid, "Рабочее время")
+    await h.say(uid, "Вчера")
+    mark = h.mark()
+    await h.say(uid, "7,5")
+    check("запись за вчера",
+          db_one("SELECT duration_min FROM work_days WHERE user_id=? AND date=?", (uid, yesterday()))[0] == 450)
+
+    await h.say(uid, "Рабочее время")
+    mark = h.mark()
+    await h.say(uid, "15.10.2026")
+    check("понимает дату", "15.10.2026" in h.last(mark), h.last(mark))
+    await h.say(uid, "6")
+    check("запись на введённую дату",
+          db_count("SELECT COUNT(*) FROM work_days WHERE user_id=? AND date=?", (uid, "2026-10-15")) == 1)
+
+    # обнуление дня
+    await h.say(uid, "Рабочее время")
+    await h.say(uid, "Сегодня")
+    mark = h.mark()
+    await h.say(uid, "0")
+    check("0 убирает день из учёта",
+          db_count("SELECT COUNT(*) FROM work_days WHERE user_id=? AND date=?", (uid, today())) == 0,
+          h.last(mark))
+    check("сообщение про удаление", "Убрал" in h.last(mark), h.last(mark))
+
+    # ошибки ввода
+    await h.say(uid, "Рабочее время")
+    mark = h.mark()
     await h.say(uid, "31.02.2026")
     check("невалидная дата отклонена", "Не понял дату" in h.last(mark), h.last(mark))
 
+    await h.say(uid, "Рабочее время")
+    await h.say(uid, "Сегодня")
+    mark = h.mark()
+    await h.say(uid, "много работы")
+    check("кривые часы -> переспрос", "Не похоже на часы" in h.last(mark), h.last(mark))
 
-async def test_work_stats(h: Harness) -> None:
-    """Статистика и переключение периодов."""
-    print("\n— рабочее время: статистика")
+    mark = h.mark()
+    await h.say(uid, "25")
+    check("слишком много часов отклонено", "больше" in h.last(mark), h.last(mark))
+
+    await h.say(uid, "8")
+    check("после ошибок ввод продолжился",
+          db_count("SELECT COUNT(*) FROM work_days WHERE user_id=? AND duration_min=480", (uid,)) == 1)
+
+
+async def test_payout(h: Harness) -> None:
+    """Ставка и расчёт за текущий и все предыдущие месяцы."""
+    print("\n— заработок")
 
     uid = next(USER_SEQ)
-    db_write(
-        "INSERT INTO work_sessions (user_id, date, duration_min, source) VALUES (?, ?, 300, 'manual')", (uid, today())
-    )
-    db_write(
-        "INSERT INTO work_sessions (user_id, date, duration_min, source) VALUES (?, ?, 480, 'manual')",
-        (uid, week_range()[0]),
-    )
 
-    mark = h._mark()
-    await h.say(uid, "Статистика")
+    # ставка не задана -> бот просит её ввести
+    mark = h.mark()
+    await h.say(uid, "Заработок")
+    check("без ставки просит ввести", "часовая ставка" in h.last(mark).lower(), h.last(mark))
+
+    mark = h.mark()
+    await h.say(uid, "abc")
+    check("кривая ставка отклонена", "число за час" in h.last(mark), h.last(mark))
+
+    mark = h.mark()
+    await h.say(uid, "850")
     text = h.last(mark)
-    check("статистика показалась", "Рабочее время" in text and "Неделя" in text, text[:80])
-    check("прогресс-бар на месте", "▓" in text or "░" in text, text[:120])
-    check("факт недели посчитан", "8 ч" in text, text)
+    check("ставка подтверждена в расчёте", "Ставка: 850 за час" in text, text)
+    check("пустая база объясняется", "Записей пока нет" in text, text)
+    check("ставка сохранена",
+          float(db_one("SELECT value FROM settings WHERE user_id=? AND key='hourly_rate'", (uid,))[0]) == 850.0)
 
-    # переключение периода инлайн-кнопкой
-    mark = h._mark()
-    await h.tap(uid, "work_p:day")
+    # только прошлый месяц -> текущий помечен пустым
+    db_write("INSERT INTO work_days (user_id, date, duration_min) VALUES (?, '2026-09-15', 480)", (uid,))
+    db_write("INSERT INTO work_days (user_id, date, duration_min) VALUES (?, '2026-09-16', 240)", (uid,))
+
+    mark = h.mark()
+    await h.say(uid, "Заработок")
     text = h.last(mark)
-    check("переключение на день", "День" in text and human_date(today()) in text, text[:120])
-    check("дневная разбивка с записями", "5 ч" in text, text)
+    check("пустой текущий месяц помечен", "пока пусто" in text, text)
+    check("прошлый месяц в списке", "Сентябрь 2026 · 12 ч за 2 дн. = 10 200" in text, text)
 
-    await h.tap(uid, "work_p:month")
-    check("переключение на месяц", "Месяц" in h.last(mark), h.last(mark)[:120])
+    # добавляем текущий месяц
+    db_write("INSERT INTO work_days (user_id, date, duration_min) VALUES (?, ?, 510)", (uid, today()))
 
+    mark = h.mark()
+    await h.say(uid, "Заработок")
+    text = h.last(mark)
+    print(text)
+    print("-" * 40)
 
-async def test_work_norm(h: Harness) -> None:
-    """Настройка нормы часов."""
-    print("\n— рабочее время: норма")
+    check("текущий месяц посчитан", f"{month_title(today()[:7])} · сейчас · 8 ч 30 мин" in text, text)
+    check("деньги за текущий месяц", "= 7 225" in text, text)
+    check("итог за всё время", "Итого: 20 ч 30 мин · 3 дн. = 17 425" in text, text)
+    check("средний день посчитан", "Средний день: 6 ч 50 мин" in text, text)
 
-    uid = next(USER_SEQ)
-    mark = h._mark()
-    await h.say(uid, "Норма часов")
-    check("спрашивает дневную норму", "часов в день" in h.last(mark), h.last(mark))
+    # ставка меняется кнопкой под сообщением
+    mark = h.mark()
+    await h.tap(uid, "payout_rate")
+    check("кнопка ставки спрашивает число", "часовая ставка" in h.last(mark).lower(), h.last(mark))
 
-    await h.say(uid, "30")
-    check("дневная норма вне диапазона отклонена", "разумных пределах" in h.last(mark), h.last(mark))
+    mark = h.mark()
+    await h.say(uid, "1000")
+    text = h.last(mark)
+    check("пересчёт по новой ставке", "Ставка: 1 000 за час" in text and "= 8 500" in text, text)
 
-    mark = h._mark()
-    await h.say(uid, "7,5")
-    check("спрашивает недельную норму", "неделю" in h.last(mark), h.last(mark))
-
-    await h.say(uid, "200")
-    check("недельная норма вне диапазона отклонена", "в неделю" in h.last(mark), h.last(mark))
-
-    mark = h._mark()
-    await h.say(uid, "37,5")
-    check("нормы сохранены", "Норма:" in h.last(mark), h.last(mark))
-    saved_day = db_one("SELECT value FROM settings WHERE user_id=? AND key='work_hours_per_day'", (uid,))[0]
-    saved_week = db_one("SELECT value FROM settings WHERE user_id=? AND key='work_hours_per_week'", (uid,))[0]
-    check("дневная норма в базе", float(saved_day) == 7.5, str(saved_day))
-    check("недельная норма в базе", float(saved_week) == 37.5, str(saved_week))
-
-    # норма влияет на статистику
-    db_write(
-        "INSERT INTO work_sessions (user_id, date, duration_min, source) VALUES (?, ?, 450, 'manual')", (uid, today())
-    )
-    mark = h._mark()
-    await h.say(uid, "Статистика")
-    await h.tap(uid, "work_p:day")
-    check("статистика учитывает новую норму", "7,5 ч" in h.last(mark), h.last(mark)[:200])
-
-
-async def test_work_delete(h: Harness) -> None:
-    """Удаление записи через инлайн-кнопки с подтверждением."""
-    print("\n— рабочее время: удаление")
-
-    uid = next(USER_SEQ)
-    db_write(
-        "INSERT INTO work_sessions (user_id, date, duration_min, source) VALUES (?, ?, 240, 'manual')", (uid, today())
-    )
-    entry_id = db_one("SELECT id FROM work_sessions WHERE user_id=?", (uid,))[0]
-
-    mark = h._mark()
-    await h.say(uid, "Удалить запись")
-    check("список на удаление показан", "Какую запись удалить" in h.last(mark), h.last(mark))
-
-    mark = h._mark()
-    await h.tap(uid, f"work_del:{entry_id}")
-    check("спрашивает подтверждение", "Удалить" in h.last(mark) and "240" not in h.last(mark), h.last(mark))
-
-    mark = h._mark()
-    await h.tap(uid, "work_del_no")
-    check("отмена работает", "Не трогаю" in h.last(mark), h.last(mark))
-    check("после отмены запись цела", db_one("SELECT COUNT(*) FROM work_sessions WHERE id=?", (entry_id,))[0] == 1)
-
-    await h.tap(uid, f"work_del:{entry_id}")
-    mark = h._mark()
-    await h.tap(uid, f"work_del_yes:{entry_id}")
-    check("запись удалена", db_one("SELECT COUNT(*) FROM work_sessions WHERE id=?", (entry_id,))[0] == 0)
-
-    # чужую запись удаление не зацепит: запрос фильтрует по user_id
-    victim = next(USER_SEQ)
-    db_write(
-        "INSERT INTO work_sessions (user_id, date, duration_min, source) VALUES (?, ?, 60, 'manual')",
-        (victim, today()),
-    )
-    victim_id = db_one("SELECT id FROM work_sessions WHERE user_id=?", (victim,))[0]
-    await h.tap(uid, f"work_del_yes:{victim_id}")
-    check("чужую запись не удаляет", db_count("SELECT COUNT(*) FROM work_sessions WHERE id=?", (victim_id,)) == 1)
-
-    await h.say(uid, "Удалить запись")
-    mark = h._mark()
-    await h.tap(uid, "work_del:cancel")
-    check("отмена списка", "Отменил" in h.last(mark), h.last(mark))
+    await h.tap(uid, "payout_rate")
+    mark = h.mark()
+    await h.say(uid, "0")
+    check("нулевая ставка отклонена", "число за час" in h.last(mark), h.last(mark))
 
 
 async def test_navigation(h: Harness) -> None:
@@ -509,31 +450,32 @@ async def test_navigation(h: Harness) -> None:
     print("\n— навигация из середины ввода")
 
     uid = next(USER_SEQ)
+
     await h.say(uid, "Приемы пищи")
-    mark = h._mark()
+    mark = h.mark()
     await h.say(uid, "Рабочее время")
-    check("из ввода калорий можно уйти в работу", "Рабочее время" in h.last(mark), h.last(mark))
+    check("из ввода калорий можно уйти в часы", "За какой день" in h.last(mark), h.last(mark))
 
-    mark = h._mark()
-    await h.say(uid, "▶ Начать работу")
-    check("таймер запустился после перехода", "поехали" in h.last(mark), h.last(mark))
-
-    await h.say(uid, "Записать вручную")
     await h.say(uid, "Сегодня")
-    mark = h._mark()
+    mark = h.mark()
+    await h.say(uid, "Заработок")
+    check("из ввода часов можно уйти в расчёт",
+          "ставка" in h.last(mark).lower() or "Заработок" in h.last(mark), h.last(mark))
+
+    # ставка не задана -> мы в состоянии Work.rate; кнопка раздела уводит оттуда
+    mark = h.mark()
     await h.say(uid, "Данные за сегодня")
-    check("сводка доступна из ввода длительности", "Данные за" in h.last(mark), h.last(mark)[:120])
-    check("сводка содержит рабочее время", "Рабочее время" in h.last(mark), h.last(mark)[:200])
+    check("сводка доступна из ввода ставки", "Данные за" in h.last(mark), h.last(mark)[:120])
 
-    mark = h._mark()
-    await h.say(uid, "Главное меню")
-    check("возврат в главное меню", "Выберите действие" in h.last(mark), h.last(mark))
-
+    mark = h.mark()
     await h.say(uid, "Рабочее время")
-    await h.say(uid, "▶ Начать работу")
-    check("сессия живёт после выхода в меню",
-          db_one("SELECT COUNT(*) FROM work_sessions WHERE user_id=? AND end_time IS NULL", (uid,))[0] == 1)
-    await h.say(uid, "■ Завершить работу")
+    await h.say(uid, "Сегодня")
+    await h.say(uid, "5")
+    check("запись после перехода работает", "5 ч" in h.last(mark), h.last(mark))
+
+    mark = h.mark()
+    await h.say(uid, "Вес на сегодня")
+    check("кнопка веса работает из ввода часов", "Введите ваш вес" in h.last(mark), h.last(mark))
 
 
 async def test_fallback(h: Harness) -> None:
@@ -541,54 +483,140 @@ async def test_fallback(h: Harness) -> None:
     print("\n— fallback и cancel")
 
     uid = next(USER_SEQ)
-    mark = h._mark()
+    mark = h.mark()
     await h.say(uid, "просто так")
     check("непонятный текст -> подсказка", "Выберите действие" in h.last(mark), h.last(mark))
 
-    await h.say(uid, "Вес на сегодня")
-    mark = h._mark()
+    await h.say(uid, "Рабочее время")
+    mark = h.mark()
     await h.say(uid, "/cancel")
     check("/cancel сбрасывает ввод", "Отменено" in h.last(mark), h.last(mark))
 
-    await h.say(uid, "Вес на сегодня")
-    mark = h._mark()
     await h.say(uid, "Рабочее время")
-    await h.say(uid, "7")
-    check("случайное число после выхода из ввода не записалось в вес",
-          db_one("SELECT current_weight FROM users WHERE user_id=?", (uid,)) is None)
+    await h.say(uid, "Сегодня")
+    mark = h.mark()
+    await h.say(uid, "/cancel")
+    check("/cancel работает на втором шаге", "Отменено" in h.last(mark), h.last(mark))
+
+    mark = h.mark()
+    await h.say(uid, "10")
+    check("после /cancel число не записалось",
+          db_count("SELECT COUNT(*) FROM work_days WHERE user_id=?", (uid,)) == 0)
 
 
 async def test_report_building(h: Harness) -> None:
-    """Отчёт и сводка включают рабочее время."""
+    """Отчёт и сводка включают часы и деньги."""
     print("\n— отчёт")
 
     uid = next(USER_SEQ)
-    db_write("INSERT INTO work_sessions (user_id, date, duration_min, source) VALUES (?, ?, 510, 'timer')", (uid, today()))
-    db_write("INSERT INTO work_sessions (user_id, date, duration_min, source) VALUES (?, ?, 480, 'manual')", (uid, yesterday()))
-    db_write(
-        "INSERT INTO meals (user_id, date, calories) VALUES (?, ?, 1500)", (uid, today())
-    )
+    db_write("INSERT INTO work_days (user_id, date, duration_min, note) VALUES (?, ?, 510, 'год')", (uid, today()))
+    db_write("INSERT INTO work_days (user_id, date, duration_min) VALUES (?, ?, 480)", (uid, yesterday()))
+    db_write("INSERT INTO meals (user_id, date, calories) VALUES (?, ?, 1500)", (uid, today()))
+    db_write("INSERT INTO users (user_id, weight, weight_date) VALUES (?, 80.5, ?)", (uid, today()))
 
     from db.repository import get_report_data
 
     data = await get_report_data(uid, days=30)
-    report = build_report(data, days=30, work_hours_per_day=8.0)
+    report = build_report(data, days=30, hourly_rate=850.0)
+
     check("в отчёте есть секция работы", "[РАБОЧЕЕ ВРЕМЯ]" in report)
-    check("в отчёте есть итог", "9 ч 30 мин" in report or "8 ч" in report, report[report.find("[РАБОЧЕЕ") :][:120])
+    check("в отчёте есть ставка", "Часовая ставка: 850" in report, report[:200])
+    check("в отчёте есть вес", "Текущий вес: 80.5 кг" in report, report[:200])
+    check("в отчёте есть сумма часов", "16 ч 30 мин" in report, report[report.find("[РАБОЧЕЕ") :][:200])
+    check("в отчёте есть деньги", "14 025" in report, report[report.find("[РАБОЧЕЕ") :][:200])
+    check("в отчёте есть заметка дня", "— год" in report)
     check("в отчёте есть промпт GPT", "ПРОМПТ ДЛЯ GPT" in report)
-    check("в отчёте есть баланс работы", "нормы" in report and "%" in report)
 
     summary = build_today_summary(
-        weight=80.0, calories=1500, exercises=["жим"], is_sleeping=False,
-        work_minutes=510, work_hours_per_day=8.0, active_work_minutes=None,
+        weight=80.5, calories=1500, exercises=["жим"], is_sleeping=False,
+        work_minutes=510, hourly_rate=850.0,
     )
-    check("сводка содержит рабочее время", "Рабочее время: 8 ч 30 мин из 8 ч" in summary, summary)
+    check("сводка содержит часы и деньги",
+          "Рабочее время: 8 ч 30 мин = 7 225" in summary, summary)
 
-    running = build_today_summary(
-        weight=None, calories=0, exercises=[], is_sleeping=False,
-        work_minutes=0, work_hours_per_day=8.0, active_work_minutes=45,
+    no_rate = build_today_summary(
+        weight=None, calories=0, exercises=[], is_sleeping=False, work_minutes=510, hourly_rate=None
     )
-    check("сводка показывает активную сессию", "сессия идёт" in running, running)
+    check("сводка без ставки — только часы", "Рабочее время: 8 ч 30 мин" in no_rate and "=" not in no_rate.split("Рабочее время")[1][:20], no_rate)
+
+
+async def test_migration_from_legacy_db() -> None:
+    """Самое важное: база, созданная старой версией схемы, должна дожилиться.
+
+    Именно этот тест ловит «no such column», когда CREATE TABLE IF NOT EXISTS
+    не дополняет существующую таблицу.
+    """
+    print("\n— миграция со старой схемы")
+
+    legacy_db = Path(tempfile.gettempdir()) / "trainapp_legacy.db"
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(legacy_db) + suffix).unlink(missing_ok=True)
+
+    conn = sqlite3.connect(legacy_db)
+    conn.execute(
+        "CREATE TABLE users (user_id INTEGER PRIMARY KEY, current_weight REAL, current_weight_date TEXT)"
+    )
+    conn.execute("INSERT INTO users VALUES (1, 88.5, '2026-10-01')")
+    conn.execute(
+        "CREATE TABLE meals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, date TEXT, calories INTEGER, UNIQUE(user_id, date))"
+    )
+    conn.execute("INSERT INTO meals (user_id, date, calories) VALUES (1, '2026-10-10', 2000)")
+    conn.execute(
+        "CREATE TABLE work_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+        "date TEXT NOT NULL, start_time TEXT, end_time TEXT, duration_min INTEGER, "
+        "source TEXT NOT NULL DEFAULT 'timer', note TEXT, created_at TEXT)"
+    )
+    # два дня: один день из двух сессий (должен просуммироваться), второй — ручная запись
+    conn.execute("INSERT INTO work_sessions (user_id, date, duration_min) VALUES (1, '2026-10-12', 300)")
+    conn.execute("INSERT INTO work_sessions (user_id, date, duration_min) VALUES (1, '2026-10-12', 180)")
+    conn.execute("INSERT INTO work_sessions (user_id, date, duration_min) VALUES (1, '2026-10-13', 480)")
+    conn.execute("INSERT INTO work_sessions (user_id, date, start_time) VALUES (1, '2026-10-14', '2026-10-14 09:00:00')")
+    conn.commit()
+    conn.close()
+
+    # временно перенаправляем слой доступа к данных на старую базу
+    saved = (config.DB_PATH, schema_module.DB_PATH, repository.DB_PATH)
+    try:
+        config.DB_PATH = legacy_db
+        schema_module.DB_PATH = legacy_db
+        repository.DB_PATH = legacy_db
+
+        await init_db()
+
+        conn = sqlite3.connect(legacy_db)
+        try:
+            user_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            weight_row = conn.execute("SELECT weight, weight_date FROM users WHERE user_id=1").fetchone()
+            work_days = conn.execute("SELECT date, duration_min FROM work_days ORDER BY date").fetchall()
+            meals_calories = conn.execute("SELECT calories FROM meals WHERE user_id=1").fetchone()[0]
+        finally:
+            conn.close()
+
+        check("колонки веса переименованы", {"weight", "weight_date"} <= user_cols, str(sorted(user_cols)))
+        check("вес сохранён", weight_row == (88.5, "2026-10-01"), str(weight_row))
+        check("старая таблица сессий удалена", "work_sessions" not in tables, str(sorted(tables)))
+        check("work_days создана", "work_days" in tables, str(sorted(tables)))
+        check("сессии одного дня просуммированы",
+              (work_days[0][0], work_days[0][1]) == ("2026-10-12", 480), str(work_days))
+        check("все перенесённые дни на месте", len(work_days) == 2, str(work_days))
+        check("еда не пострадала", meals_calories == 2000, str(meals_calories))
+
+        # запросы кода не падают на дожилённой базе
+        check("get_user_weight работает", await repository.get_user_weight(1) == 88.5)
+        check("get_work_by_date работает", await repository.get_work_by_date(1, "2026-10-12") == 480)
+        check("get_work_months работает",
+              await repository.get_work_months(1) == [("2026-10", 960, 2)], str(await repository.get_work_months(1)))
+
+        report = build_report(await repository.get_report_data(1, days=30), days=30, hourly_rate=None)
+        check("отчёт на старой базе собирается", "[РАБОЧЕЕ ВРЕМЯ]" in report and "16 ч" in report,
+              report[report.find("[РАБОЧЕЕ") :][:120])
+    finally:
+        config.DB_PATH, schema_module.DB_PATH, repository.DB_PATH = saved
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(str(legacy_db) + suffix)
+            if path.exists():
+                path.unlink(missing_ok=True)
 
 
 async def main() -> int:
@@ -599,17 +627,14 @@ async def main() -> int:
 
     h = Harness()
 
-    await unit_tests()
+    await test_parsers()
     await test_legacy_flows(h)
-    await test_work_timer(h)
-    await test_work_long_session(h)
-    await test_work_manual(h)
-    await test_work_stats(h)
-    await test_work_norm(h)
-    await test_work_delete(h)
+    await test_work_entry(h)
+    await test_payout(h)
     await test_navigation(h)
     await test_fallback(h)
     await test_report_building(h)
+    await test_migration_from_legacy_db()
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     failed = [item for item in RESULTS if not item[1]]

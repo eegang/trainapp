@@ -1,20 +1,18 @@
 """Разбор и форматирование длительностей.
 
-Поддерживает то, что люди реально пишут в чат: «8», «8,5», «8:30»,
-«8ч30», «480», а также заметку после значения: «8:30 закрывал год».
+Два семейства функций:
+  * :func:`parse_duration` — «сколько это минут» (голое число больше 24 —
+    минуты: «480» = 8 ч);
+  * :func:`parse_hours_and_note` — «сколько это часов» для ввода рабочих
+    часов и ставки (голое число — всегда часы: «30» = 30 ч, а не полчаса).
 """
 
 from __future__ import annotations
 
 import re
-from datetime import datetime
 
-#: Максимум, который можно записать за один день.
-MAX_DAY_MINUTES = 24 * 60
-#: Сессия, открытая дольше этого порога, почти наверняка забытая.
-SUSPICIOUS_OPEN_MINUTES = 24 * 60
-
-_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+#: Максимум часов, которые можно записать за один день.
+MAX_DAY_HOURS = 24.0
 
 # 8:30
 _HHMM = re.compile(r"^(\d{1,2})\s*:\s*(\d{1,2})(?!\d)")
@@ -27,8 +25,14 @@ _HOURS_WITH = re.compile(
 _MINUTES_ONLY = re.compile(r"^(\d{1,4})\s*(?:мин(?:ут(?:ы|ов)?)?|м(?![а-яa-z\d]))", re.IGNORECASE)
 # 8, 8,5, 8.5, 480
 _PLAIN = re.compile(r"^(\d{1,4})(?:[.,](\d{1,2}))?(?![\d.,])")
+# «8», «8,5», «8.25», «8 закрыл год»; после числа — конец строки или пробел,
+# иначе «8:30» распалось бы на 8 часов и заметку «:30».
+_HOURS_LEADING = re.compile(r"^(\d{1,4}(?:\.\d{1,2})?)(?:\s+(.*))?$", re.DOTALL)
 
 _SEPARATORS = " \t\r\n-–—:;,."
+
+#: Часы за день, которые можно записать (в минутах).
+MAX_DAY_MINUTES = int(MAX_DAY_HOURS * 60)
 
 
 def _tail(text: str, end: int) -> str:
@@ -37,14 +41,12 @@ def _tail(text: str, end: int) -> str:
 
 
 def parse_duration(raw: str | None) -> tuple[int | None, str]:
-    """Разбирает длительность и заметку.
+    """Разбирает длительность в минутах и заметку.
 
     >>> parse_duration("8:30 закрыл год")
     (510, 'закрыл год')
-    >>> parse_duration("8,5")
-    (510, '')
 
-    Возвращает ``(минуты, заметка)``. Минуты равны ``None``, если текст не
+    Возвращает ``(минуты, заметка)``; минуты равны ``None``, если текст не
     похож на длительность.
     """
     if not raw:
@@ -79,12 +81,11 @@ def parse_duration(raw: str | None) -> tuple[int | None, str]:
         whole = int(m.group(1))
         fraction = m.group(2)
         if fraction is not None:
-            # 8,5 и 8,75 — это доли часа
             minutes = round(whole * 60 + float("0." + fraction) * 60)
         elif whole <= 24:
             minutes = whole * 60
         else:
-            minutes = whole  # 480 трактуем как минуты
+            minutes = whole
         if not 0 < minutes <= MAX_DAY_MINUTES:
             return None, ""
         return minutes, _tail(text, m.end())
@@ -92,36 +93,35 @@ def parse_duration(raw: str | None) -> tuple[int | None, str]:
     return None, ""
 
 
-def parse_hours(raw: str | None) -> float | None:
-    """Часы как самостоятельная величина: 8, 8,5, 200, 8:30, 8ч30.
+def parse_hours_and_note(raw: str | None) -> tuple[float | None, str]:
+    """Разбирает часы и необязательную заметку: «8», «8,5», «8:30», «8ч30».
 
-    В отличие от :func:`parse_duration`, голое число — это всегда **часы**,
-    а не минуты: в ответ на вопрос «сколько часов норма» «30» означает
-    30 часов, а не полчаса.
+    Голое число трактуется как **часы** всегда: в ответ на вопрос «сколько
+    часов» «30» означает 30 часов, а не полчаса.
     """
-    text = (raw or "").strip()
-    if not text:
-        return None
+    if not raw:
+        return None, ""
 
-    normalized = text.replace(",", ".")
-    if re.fullmatch(r"\d{1,4}(?:\.\d{1,2})?", normalized):
-        return round(float(normalized), 2)
+    text = raw.strip()
+    if not text:
+        return None, ""
+
+    m = _HOURS_LEADING.match(text.replace(",", "."))
+    if m:
+        return float(m.group(1)), (m.group(2) or "").strip()
 
     minutes, note = parse_duration(text)
-    if minutes is None or note:
-        return None
-    return round(minutes / 60, 2)
+    if minutes is None:
+        return None, ""
+    return round(minutes / 60, 2), note
 
 
-def minutes_since(timestamp: str | None) -> int | None:
-    """Сколько минут прошло от метки времени «YYYY-MM-DD HH:MM:SS»."""
-    if not timestamp:
+def parse_hours(raw: str | None) -> float | None:
+    """Часы без примеси заметки. None, если текст не понят."""
+    hours, note = parse_hours_and_note(raw)
+    if hours is None or note:
         return None
-    try:
-        started = datetime.strptime(timestamp, _TS_FORMAT)
-    except ValueError:
-        return None
-    return max(0, int((datetime.now() - started).total_seconds() // 60))
+    return hours
 
 
 def format_minutes(total: int | None) -> str:
@@ -135,32 +135,20 @@ def format_minutes(total: int | None) -> str:
     return f"{hours} ч {minutes:02d} мин" if minutes else f"{hours} ч"
 
 
-def format_short_hours(total_minutes: int | None) -> str:
-    """Компактные часы для норм: 480 -> «8 ч», 510 -> «8,5 ч»."""
+def _trim(value: float) -> str:
+    """8.0 -> «8», 8.5 -> «8,5»."""
+    return f"{value:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def format_hours(total: float | None) -> str:
+    """Часы -> «8 ч», «8,5 ч»."""
+    if total is None:
+        return "—"
+    return f"{_trim(total)} ч"
+
+
+def format_minutes_as_hours(total_minutes: int | None) -> str:
+    """Минуты в часовом виде: 510 -> «8,5 ч»."""
     if total_minutes is None:
         return "—"
-    hours = total_minutes / 60
-    text = f"{hours:.2f}".rstrip("0").rstrip(".").replace(".", ",")
-    return f"{text} ч"
-
-
-def format_hours_value(hours: float | None) -> str:
-    """То же самое, но для значения в часах (нормы, границы допусков)."""
-    if hours is None:
-        return "—"
-    return format_short_hours(int(round(hours * 60)))
-
-
-def percent(fact: int, target: int) -> int:
-    """Доля выполнения, без деления на ноль."""
-    if target <= 0:
-        return 0
-    return round(fact / target * 100)
-
-
-def progress_bar(fact: int, target: int, width: int = 10) -> str:
-    """▓▓▓▓░░░░░░ — наглядная шкала выполнения."""
-    if target <= 0:
-        return "░" * width
-    filled = max(0, min(width, round(fact / target * width)))
-    return "▓" * filled + "░" * (width - filled)
+    return format_hours(total_minutes / 60)

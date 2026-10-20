@@ -1,8 +1,8 @@
 """Переключение разделов из середины ввода.
 
-Пока бот ждёт число (вес, калории, длительность), любое сообщение попадает в
-хендлер состояния. Без этой модули нажатие «Статистика» привело бы к ответу
-«не похоже на длительность». Поэтому каждый хендлер-ввод начинается с
+Пока бот ждёт число (вес, калории, часы, ставку), любое сообщение попадает в
+хендлер состояния. Без этой модули нажатие «Заработок» привело бы к ответу
+«не похоже на часы». Поэтому каждый хендлер-ввод начинается с
 ``forward_to_menu``: если текст — кнопка раздела, состояние сбрасывается и
 раздел открывается по-настоящему.
 """
@@ -26,26 +26,18 @@ def _menu() -> dict[str, object]:
         return _MENU
 
     from app import keyboards as kb
-    from app.handlers import exercises, export, meals, sleep, weight, work
+    from app.handlers import exercises, export, meals, payout, sleep, weight, work
 
     _MENU = {
-        # Главное меню
         kb.MAIN_MENU_TEXT: weight.ask_weight,
         kb.MEALS_TEXT: meals.ask_calories_date,
         kb.EXERCISES_TEXT: exercises.ask_exercise,
-        kb.WORK_TEXT: work.open_work_menu,
+        kb.WORK_TEXT: work.ask_date,
+        kb.PAYOUT_TEXT: payout.show_payout,
         kb.TODAY_TEXT: export.today_data,
         kb.SLEEP_TEXT: sleep.go_to_sleep,
         kb.WAKE_TEXT: sleep.wake_up,
         kb.EXPORT_TEXT: export.export_data,
-        # Блок «Рабочее время»
-        kb.WORK_START_TEXT: work.start_timer,
-        kb.WORK_FINISH_TEXT: work.finish_timer,
-        kb.WORK_MANUAL_TEXT: work.ask_manual_date,
-        kb.WORK_STATS_TEXT: work.stats,
-        kb.WORK_DELETE_TEXT: work.list_for_delete,
-        kb.WORK_NORM_TEXT: work.ask_norm_day,
-        kb.WORK_BACK_TEXT: work.back_to_main,
     }
     return _MENU
 

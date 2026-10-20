@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.dates import human_date, shift_days, today, working_days_between
-from app.duration import format_minutes, format_short_hours, percent, progress_bar
+from app import money
+from app.dates import human_date, today
+from app.duration import format_minutes
 
 GPT_PROMPT = (
     "Проанализируй эти данные о тренировках, питании, сне и рабочем времени за период. "
@@ -24,23 +25,20 @@ def _section(lines: list[str], title: str, count: int, rows: list[str]) -> None:
     lines.append("")
 
 
-def build_report(
-    data: dict,
-    *,
-    days: int = 30,
-    work_hours_per_day: float = 8.0,
-) -> str:
+def build_report(data: dict, *, days: int = 30, hourly_rate: float | None = None) -> str:
     """Собирает текстовый отчёт за последние N дней."""
     lines: list[str] = []
     lines.append("=" * 50)
     lines.append(f"ОТЧЁТ ЗА ПОСЛЕДНИЕ {days} ДНЕЙ")
     lines.append(f"Дата формирования: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if hourly_rate:
+        lines.append(f"Часовая ставка: {money.format_money(hourly_rate)}")
     lines.append("=" * 50)
     lines.append("")
 
     # --- Вес ---
     lines.append("[ПРОГРЕСС ВЕСА]")
-    current = data.get("current_weight")
+    current = data.get("weight")
     if current:
         lines.append(f"Текущий вес: {current[0]} кг (обновлён {human_date(current[1])})")
     else:
@@ -73,7 +71,7 @@ def build_report(
     )
 
     # --- Работа ---
-    lines.extend(build_work_lines(data, days=days, work_hours_per_day=work_hours_per_day))
+    lines.extend(build_work_lines(data, hourly_rate=hourly_rate))
 
     # --- Сон ---
     sleeps = data.get("sleeps") or []
@@ -93,26 +91,31 @@ def build_report(
     return "\n".join(lines)
 
 
-def build_work_lines(data: dict, *, days: int, work_hours_per_day: float) -> list[str]:
-    """Секция рабочего времени для отчёта: факт против нормы."""
+def build_work_lines(data: dict, *, hourly_rate: float | None = None) -> list[str]:
+    """Секция рабочего времени: часы за период и деньги по ставке."""
     work = data.get("work") or []
-    total_min = sum(minutes for _, minutes in work)
-    day_target_min = int(round(work_hours_per_day * 60))
-    expected_min = day_target_min * working_days_between(shift_days(today(), -days), today())
+    total_min = sum(minutes for _, minutes, _ in work)
+    hours = total_min / 60
 
-    lines = [f"[РАБОЧЕЕ ВРЕМЯ] — {len(work)} дней с записями"]
-    lines.append(
-        f"  Итого: {format_minutes(total_min)} из {format_short_hours(expected_min)} "
-        f"нормы ({percent(total_min, expected_min)}%)"
-    )
-    lines.append(f"  Норма: {format_short_hours(day_target_min)} в день (пн–пт)")
-
-    if total_min > expected_min > 0:
-        lines.append(f"  ⚠️ Переработка за период: +{format_minutes(total_min - expected_min)}")
+    lines = [f"[РАБОЧЕЕ ВРЕМЯ] — {len(work)} дней"]
 
     if work:
+        summary = f"  Итого: {format_minutes(total_min)}"
+        earned = money.earnings(hours, hourly_rate)
+        if earned is not None:
+            summary += f" = {money.format_money(earned)}"
+        elif hourly_rate is None:
+            summary += " (ставка не задана)"
+        lines.append(summary)
+        lines.append(
+            f"  Среднее за рабочий день: {format_minutes(round(total_min / len(work)))}"
+        )
         lines.append("  По дням:")
-        lines.extend(f"    {human_date(date)}: {format_minutes(minutes)}" for date, minutes in work)
+        for date, minutes, note in work:
+            entry = f"    {human_date(date)}: {format_minutes(minutes)}"
+            if note:
+                entry += f" — {note}"
+            lines.append(entry)
     else:
         lines.append("  (нет данных)")
     lines.append("")
@@ -127,12 +130,9 @@ def build_today_summary(
     exercises: list[str],
     is_sleeping: bool,
     work_minutes: int = 0,
-    work_hours_per_day: float = 8.0,
-    active_work_minutes: int | None = None,
+    hourly_rate: float | None = None,
 ) -> str:
     """Короткая сводка за сегодня."""
-    day_target_min = int(round(work_hours_per_day * 60))
-
     lines = [f"Данные за {human_date(today())}:", ""]
     lines.append(f"Вес: {weight} кг" if weight is not None else "Вес: не указан")
     lines.append(f"Калории за сегодня: {calories} ккал")
@@ -142,9 +142,10 @@ def build_today_summary(
     else:
         lines.append("Упражнения: не указано")
 
-    work_line = f"Рабочее время: {format_minutes(work_minutes)} из {format_short_hours(day_target_min)}"
-    if active_work_minutes is not None:
-        work_line += f" (🟢 сессия идёт, {format_minutes(active_work_minutes)})"
+    earned = money.earnings(work_minutes / 60, hourly_rate) if work_minutes else None
+    work_line = f"Рабочее время: {format_minutes(work_minutes)}"
+    if earned is not None:
+        work_line += f" = {money.format_money(earned)}"
     lines.append(work_line)
 
     lines.append("Статус: Спите" if is_sleeping else "Статус: Проснулись")

@@ -5,8 +5,8 @@
 *.db
 *.db-wal
 *.db-shm
-*.db.bak
 *.sqlite3
+*.bak
 
 # Python
 __pycache__/
