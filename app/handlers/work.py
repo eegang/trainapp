@@ -14,11 +14,11 @@ from aiogram.fsm.context import FSMContext
 from app import money, prefs
 from app.dates import human_date, month_label, month_range, today, yesterday, parse_user_date
 from app.duration import MAX_DAY_HOURS, format_minutes, parse_hours_and_note
-from app.keyboards import (
-    TODAY_BUTTON,
-    WORK_TEXT,
-    YESTERDAY_BUTTON,
-    date_choice_keyboard,
+from app.menu import (
+    DAY_TODAY,
+    DAY_YESTERDAY,
+    WORK,
+    date_keyboard,
     main_keyboard,
 )
 from app.navigation import forward_to_menu
@@ -37,20 +37,20 @@ router = Router()
 MAX_HOURS = MAX_DAY_HOURS
 
 
-@router.message(F.text == WORK_TEXT)
+@router.message(F.text == WORK)
 async def ask_date(message: types.Message, state: FSMContext) -> None:
     """Начало записи: за какой день отработали."""
     await state.clear()
     await state.set_state(Work.manual_date)
     await message.answer(
         "За какой день записать часы? Нажмите кнопку или напиши дату, например 20.10.",
-        reply_markup=date_choice_keyboard(),
+        reply_markup=date_keyboard(),
     )
 
 
-@router.message(Work.manual_date, F.text.in_([TODAY_BUTTON, YESTERDAY_BUTTON]))
+@router.message(Work.manual_date, F.text.in_([DAY_TODAY, DAY_YESTERDAY]))
 async def pick_date(message: types.Message, state: FSMContext) -> None:
-    target = today() if message.text == TODAY_BUTTON else yesterday()
+    target = today() if message.text == DAY_TODAY else yesterday()
     await _ask_hours(message, state, target)
 
 
@@ -64,7 +64,7 @@ async def type_date(message: types.Message, state: FSMContext) -> None:
     if not target:
         await message.answer(
             "Не понял дату. Нажми «Сегодня»/«Вчера» или напиши 20.10.2026. /cancel — отмена.",
-            reply_markup=date_choice_keyboard(),
+            reply_markup=date_keyboard(),
         )
         return
 

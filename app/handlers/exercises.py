@@ -1,9 +1,9 @@
-"""Хендлеры: упражнения."""
+"""Хендлеры: тренировки (свободный текст, одно сообщение — одна запись)."""
 
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 
-from app.keyboards import main_keyboard
+from app.menu import TRAINING, main_keyboard
 from app.navigation import forward_to_menu
 from app.states import Form
 from db.repository import add_exercise
@@ -11,13 +11,11 @@ from db.repository import add_exercise
 router = Router()
 
 
-@router.message(F.text == "Показатели упражнений")
+@router.message(F.text == TRAINING)
 async def ask_exercise(message: types.Message, state: FSMContext) -> None:
     """Просит описание тренировки."""
     await state.clear()
-    await message.answer(
-        "Введите данные упражнений одним сообщением.\nНапример: бицепс 20x5\nПресс 30x3"
-    )
+    await message.answer("Опиши тренировку одним сообщением, например:\nбицепс 20x5\nпресс 30x3")
     await state.set_state(Form.exercises)
 
 
@@ -29,10 +27,9 @@ async def save_exercise(message: types.Message, state: FSMContext) -> None:
 
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Пустое сообщение. Введите данные упражнения:")
+        await message.answer("Пустое сообщение. Опиши тренировку текстом:")
         return
 
     await add_exercise(message.from_user.id, text)
-
     await state.clear()
-    await message.answer(f"Сохранено: {text}", reply_markup=main_keyboard())
+    await message.answer(f"Записал 💾\n{text}", reply_markup=main_keyboard())

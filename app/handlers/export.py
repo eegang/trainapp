@@ -1,4 +1,4 @@
-"""Хендлеры: выгрузка отчёта и сводка за сегодня."""
+"""Хендлеры: сводка за сегодня и текстовый отчёт за 30 дней."""
 
 import os
 import tempfile
@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 
 from app import prefs
 from app.dates import today
-from app.keyboards import main_keyboard
+from app.menu import REPORT, TODAY, main_keyboard
 from app.report import build_report, build_today_summary
 from db.repository import (
     get_exercises_for_date,
@@ -22,18 +22,14 @@ from db.repository import (
 router = Router()
 
 
-@router.message(F.text == "Выгрузить данные за 30 дней")
+@router.message(F.text == REPORT)
 async def export_data(message: types.Message, state: FSMContext) -> None:
-    """Отправляет файл с отчётом за 30 дней."""
+    """Отправляет файл с отчётом за 30 дней (для анализа в GPT)."""
     await state.clear()
 
     user_id = message.from_user.id
     data = await get_report_data(user_id, days=30)
-    report = build_report(
-        data,
-        days=30,
-        hourly_rate=await prefs.get_hourly_rate(user_id),
-    )
+    report = build_report(data, days=30, hourly_rate=await prefs.get_hourly_rate(user_id))
 
     temp_path = ""
     try:
@@ -46,16 +42,16 @@ async def export_data(message: types.Message, state: FSMContext) -> None:
         await message.bot.send_document(
             message.chat.id,
             types.FSInputFile(temp_path),
-            caption="Отчёт за 30 дней для анализа в GPT",
+            caption="Отчёт за 30 дней — можно отправить в GPT на разбор.",
         )
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
 
-@router.message(F.text == "Данные за сегодня")
+@router.message(F.text == TODAY)
 async def today_data(message: types.Message, state: FSMContext) -> None:
-    """Показывает сводку за сегодня."""
+    """Сводка за сегодня: вес, еда, тренировки, работа, сон."""
     await state.clear()
 
     user_id = message.from_user.id
@@ -68,4 +64,4 @@ async def today_data(message: types.Message, state: FSMContext) -> None:
         hourly_rate=await prefs.get_hourly_rate(user_id),
     )
 
-    await message.answer(f"{summary}\nВыберите другое действие:", reply_markup=main_keyboard())
+    await message.answer(summary, reply_markup=main_keyboard())

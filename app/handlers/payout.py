@@ -9,18 +9,30 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 
 from app import money, prefs
 from app.dates import month_label, today
 from app.duration import format_minutes
-from app.keyboards import PAYOUT_TEXT, RATE_CALLBACK, payout_keyboard
+from app.menu import PAYOUT
 from app.navigation import forward_to_menu
 from app.states import Work
 from db.repository import get_work_months
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+#: Колбэк кнопки «изменить ставку» под расчётом.
+RATE_CALLBACK = "payout_rate"
+
+
+def payout_keyboard(rate: float | None) -> InlineKeyboardMarkup:
+    """Кнопка изменения ставки прямо под расчётом."""
+    label = f"Ставка {money.format_money(rate)} · изменить" if rate else "Указать ставку"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=RATE_CALLBACK)]]
+    )
 
 
 def month_title(month: str) -> str:
@@ -112,7 +124,7 @@ async def ask_rate(message: types.Message, state: FSMContext, *, editing: bool =
         await message.answer(text)
 
 
-@router.message(F.text == PAYOUT_TEXT)
+@router.message(F.text == PAYOUT)
 async def show_payout(message: types.Message, state: FSMContext) -> None:
     """Расчёт за текущий и все предыдущие месяцы."""
     await state.clear()
