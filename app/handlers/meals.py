@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 
 from app.dates import human_date, today, yesterday
 from app.keyboards import TODAY_BUTTON, YESTERDAY_BUTTON, date_choice_keyboard, main_keyboard
+from app.navigation import forward_to_menu
 from app.states import Form
 from db.repository import add_meal_calories, get_meals_calories
 
@@ -44,12 +45,18 @@ async def choose_date(message: types.Message, state: FSMContext) -> None:
 @router.message(Form.meals_date)
 async def wrong_date_choice(message: types.Message, state: FSMContext) -> None:
     """Не распознали выбор дня — спрашиваем ещё раз."""
+    if await forward_to_menu(message, state):
+        return
+
     await message.answer("Выберите «Сегодня» или «Вчера».", reply_markup=date_choice_keyboard())
 
 
 @router.message(Form.meals)
 async def save_calories(message: types.Message, state: FSMContext) -> None:
     """Сохраняет калории за выбранный день."""
+    if await forward_to_menu(message, state):
+        return
+
     raw = (message.text or "").strip()
 
     if raw in DATE_CHOICES:

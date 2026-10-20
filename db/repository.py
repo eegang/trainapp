@@ -229,6 +229,20 @@ async def get_report_data(user_id: int, days: int = 30) -> dict:
         ) as cursor:
             sleeps = await cursor.fetchall()
 
+        date_to = datetime.now().strftime("%Y-%m-%d")
+        async with conn.execute(
+            f"SELECT date, SUM(duration_min) FROM work_sessions "
+            f"WHERE user_id = ? AND date >= ? AND date <= ? AND {WORK_DONE_SQL} "
+            f"GROUP BY date ORDER BY date",
+            (user_id, date_from, date_to),
+        ) as cursor:
+            work = await cursor.fetchall()
+
+        async with conn.execute(
+            "SELECT key, value FROM settings WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            setting_rows = await cursor.fetchall()
+
     return {
         "current_weight": (
             (weight_row["current_weight"], weight_row["current_weight_date"])
@@ -241,6 +255,8 @@ async def get_report_data(user_id: int, days: int = 30) -> dict:
         "sleeps": [
             (row["start_time"], row["end_time"], row["duration_min"]) for row in sleeps
         ],
+        "work": [(row["date"], int(row[1])) for row in work],
+        "settings": {row["key"]: row["value"] for row in setting_rows},
     }
 
 
@@ -250,3 +266,184 @@ def _shift_days(date_str: str, days: int) -> str:
 
     parsed = datetime.strptime(date_str, "%Y-%m-%d").date()
     return (parsed + timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+# ---------- Рабочее время ----------
+#
+# Модель одна и та же для таймера и ручных записей:
+#   * таймер:  start_time заполнен, end_time/duration_min пустые, пока активен;
+#   * вручную: start_time/end_time пустые, duration_min заполнен сразу.
+# Поэтому «закрытая» запись — это любое сообщение с duration_min, а
+# «активная» — строка со start_time без end_time.
+
+#: Записи, которые уже можно суммировать.
+WORK_DONE_SQL = "duration_min IS NOT NULL"
+#: Единственная активная сессия-таймер пользователя.
+WORK_ACTIVE_SQL = "start_time IS NOT NULL AND end_time IS NULL"
+
+
+async def start_work(user_id: int, note: str | None = None) -> int:
+    """Открывает рабочую сессию. Возвращает её id."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "INSERT INTO work_sessions (user_id, date, start_time, source, note) "
+            "VALUES (?, date('now', 'localtime'), ?, 'timer', ?)",
+            (user_id, now, note),
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def get_active_work(user_id: int) -> dict | None:
+    """Активная (незакрытая) сессия-таймер либо None."""
+    async with get_connection() as conn:
+        async with conn.execute(
+            f"SELECT id, date, start_time, note FROM work_sessions "
+            f"WHERE user_id = ? AND {WORK_ACTIVE_SQL} ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "date": row["date"], "start_time": row["start_time"], "note": row["note"]}
+
+
+async def finish_work(user_id: int, session_id: int) -> dict | None:
+    """Закрывает сессию-таймер, возвращает её данные либо None, если не нашли."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with get_connection() as conn:
+        async with conn.execute(
+            f"SELECT id, date, start_time, note FROM work_sessions "
+            f"WHERE user_id = ? AND id = ? AND {WORK_ACTIVE_SQL}",
+            (user_id, session_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+
+        started = datetime.strptime(row["start_time"], "%Y-%m-%d %H:%M:%S")
+        duration = int((datetime.strptime(now, "%Y-%m-%d %H:%M:%S") - started).total_seconds() // 60)
+        duration = max(0, duration)
+
+        await conn.execute(
+            "UPDATE work_sessions SET end_time = ?, duration_min = ? WHERE id = ?",
+            (now, duration, row["id"]),
+        )
+        await conn.commit()
+
+    return {
+        "id": row["id"],
+        "date": row["date"],
+        "start_time": row["start_time"],
+        "end_time": now,
+        "duration_min": duration,
+        "note": row["note"],
+    }
+
+
+async def add_work_entry(user_id: int, date_str: str, minutes: int, note: str | None = None) -> int:
+    """Добавляет рабочий интервал вручную."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "INSERT INTO work_sessions (user_id, date, duration_min, source, note) "
+            "VALUES (?, ?, ?, 'manual', ?)",
+            (user_id, date_str, minutes, note),
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def delete_work_entry(user_id: int, session_id: int) -> bool:
+    """Удаляет запись своего пользователя. True, если что-то удалили."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "DELETE FROM work_sessions WHERE user_id = ? AND id = ?",
+            (user_id, session_id),
+        )
+        await conn.commit()
+        return cursor.rowcount > 0
+
+
+async def list_work_entries(
+    user_id: int, date_from: str, date_to: str | None = None, limit: int = 20
+) -> list[dict]:
+    """Готовые записи за диапазон — свежие первыми.
+
+    Активная сессия-таймер (без длительности) не включается: её нельзя
+    «удалить из списка», она закрывается отдельной кнопкой.
+    """
+    sql = (
+        "SELECT id, date, start_time, end_time, duration_min, source, note "
+        f"FROM work_sessions WHERE user_id = ? AND date >= ? AND {WORK_DONE_SQL}"
+    )
+    params: list = [user_id, date_from]
+    if date_to:
+        sql += " AND date <= ?"
+        params.append(date_to)
+    sql += " ORDER BY date DESC, id DESC LIMIT ?"
+    params.append(limit)
+
+    async with get_connection() as conn:
+        async with conn.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def sum_work_minutes(user_id: int, date_from: str, date_to: str) -> int:
+    """Сумма рабочих минут в диапазоне дат (включительно)."""
+    async with get_connection() as conn:
+        async with conn.execute(
+            f"SELECT COALESCE(SUM(duration_min), 0) FROM work_sessions "
+            f"WHERE user_id = ? AND date >= ? AND date <= ? AND {WORK_DONE_SQL}",
+            (user_id, date_from, date_to),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return int(row[0] or 0)
+
+
+async def get_work_by_date(user_id: int, date_str: str) -> int:
+    """Рабочие минуты за конкретный день."""
+    return await sum_work_minutes(user_id, date_str, date_str)
+
+
+async def get_work_daily_breakdown(user_id: int, date_from: str, date_to: str) -> list[tuple[str, int]]:
+    """Разбивка по дням: [(дата, минуты), ...] по возрастанию."""
+    async with get_connection() as conn:
+        async with conn.execute(
+            f"SELECT date, SUM(duration_min) FROM work_sessions "
+            f"WHERE user_id = ? AND date >= ? AND date <= ? AND {WORK_DONE_SQL} "
+            f"GROUP BY date ORDER BY date",
+            (user_id, date_from, date_to),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [(row[0], int(row[1])) for row in rows]
+
+
+# ---------- Настройки пользователя ----------
+
+async def get_setting(user_id: int, key: str) -> str | None:
+    """Значение настройки или None."""
+    async with get_connection() as conn:
+        async with conn.execute(
+            "SELECT value FROM settings WHERE user_id = ? AND key = ?", (user_id, key)
+        ) as cursor:
+            row = await cursor.fetchone()
+    return row[0] if row else None
+
+
+async def set_setting(user_id: int, key: str, value: str) -> None:
+    """Сохраняет настройку."""
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO settings (user_id, key, value, updated_at)
+            VALUES (?, ?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(user_id, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, key, value),
+        )
+        await conn.commit()
+

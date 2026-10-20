@@ -6,14 +6,18 @@ import tempfile
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 
+from app import prefs
 from app.dates import today
+from app.duration import minutes_since
 from app.keyboards import main_keyboard
 from app.report import build_report, build_today_summary
 from db.repository import (
+    get_active_work,
     get_exercises_for_date,
     get_meals_calories,
     get_report_data,
     get_user_weight,
+    get_work_by_date,
     has_active_sleep,
 )
 
@@ -25,8 +29,13 @@ async def export_data(message: types.Message, state: FSMContext) -> None:
     """Отправляет файл с отчётом за 30 дней."""
     await state.clear()
 
-    data = await get_report_data(message.from_user.id, days=30)
-    report = build_report(data)
+    user_id = message.from_user.id
+    data = await get_report_data(user_id, days=30)
+    report = build_report(
+        data,
+        days=30,
+        work_hours_per_day=await prefs.get_work_hours_per_day(user_id),
+    )
 
     temp_path = ""
     try:
@@ -52,11 +61,16 @@ async def today_data(message: types.Message, state: FSMContext) -> None:
     await state.clear()
 
     user_id = message.from_user.id
+    active = await get_active_work(user_id)
+
     summary = build_today_summary(
         weight=await get_user_weight(user_id),
         calories=await get_meals_calories(user_id, today()),
         exercises=await get_exercises_for_date(user_id, today()),
         is_sleeping=await has_active_sleep(user_id),
+        work_minutes=await get_work_by_date(user_id, today()),
+        work_hours_per_day=await prefs.get_work_hours_per_day(user_id),
+        active_work_minutes=minutes_since(active["start_time"]) if active else None,
     )
 
     await message.answer(f"{summary}\nВыберите другое действие:", reply_markup=main_keyboard())

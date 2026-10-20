@@ -5,8 +5,8 @@ from datetime import datetime
 from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 
+from app.duration import format_minutes
 from app.keyboards import main_keyboard, sleep_keyboard
-from app.report import format_duration
 from db.repository import end_sleep, has_active_sleep, start_sleep
 
 router = Router()
@@ -41,6 +41,6 @@ async def wake_up(message: types.Message, state: FSMContext) -> None:
         return
 
     await message.answer(
-        f"Доброе утро! Вы спали {format_duration(duration)} (с {start_time[:16]}).",
+        f"Доброе утро! Вы спали {format_minutes(duration)} (с {start_time[:16]}).",
         reply_markup=main_keyboard(),
     )

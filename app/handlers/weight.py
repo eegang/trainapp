@@ -6,6 +6,7 @@ from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 
 from app.keyboards import main_keyboard
+from app.navigation import forward_to_menu
 from app.states import Form
 from db.repository import add_weight_entry, get_user_weight, set_user_weight
 
@@ -32,6 +33,9 @@ async def ask_weight(message: types.Message, state: FSMContext) -> None:
 @router.message(Form.weight)
 async def save_weight(message: types.Message, state: FSMContext) -> None:
     """Сохраняет новый вес."""
+    if await forward_to_menu(message, state):
+        return
+
     raw = (message.text or "").strip().replace(",", ".")
     try:
         weight = float(raw)

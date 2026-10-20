@@ -4,6 +4,7 @@ from aiogram import F, Router, types
 from aiogram.fsm.context import FSMContext
 
 from app.keyboards import main_keyboard
+from app.navigation import forward_to_menu
 from app.states import Form
 from db.repository import add_exercise
 
@@ -23,6 +24,9 @@ async def ask_exercise(message: types.Message, state: FSMContext) -> None:
 @router.message(Form.exercises)
 async def save_exercise(message: types.Message, state: FSMContext) -> None:
     """Сохраняет описание тренировки."""
+    if await forward_to_menu(message, state):
+        return
+
     text = (message.text or "").strip()
     if not text:
         await message.answer("Пустое сообщение. Введите данные упражнения:")

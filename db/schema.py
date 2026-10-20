@@ -56,11 +56,37 @@ SCHEMA = (
         duration_min INTEGER
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS work_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        start_time TEXT,
+        end_time TEXT,
+        duration_min INTEGER,
+        source TEXT NOT NULL DEFAULT 'timer',
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_work_user_date
+        ON work_sessions (user_id, date)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS settings (
+        user_id INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        PRIMARY KEY (user_id, key)
+    )
+    """,
 )
 
 
 async def init_db() -> None:
-    """Создаёт таблицы, если их ещё нет. Существующие данные не трогает."""
+    """Создаёт таблицы и индексы, если их ещё нет. Существующие данные не трогает."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     conn = await aiosqlite.connect(DB_PATH)
