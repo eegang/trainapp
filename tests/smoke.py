@@ -37,9 +37,12 @@ from app import handlers as app_handlers                         # noqa: E402
 from app import money                                           # noqa: E402
 from app.bot import ALLOWED, bot, dp                            # noqa: E402
 from app.menu import (                                          # noqa: E402
+    BACK,
     DAY_TODAY,
     DAY_YESTERDAY,
     MEALS,
+    RECORD,
+    VIEW,
     PAYOUT,
     REPORT,
     SLEEP,
@@ -83,10 +86,15 @@ class RecordingSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[tuple[str, str | None]] = []
+        self.last_buttons: list[str] = []
 
     async def make_request(self, bot, method, timeout=None):  # noqa: ANN001, ANN401
         name = type(method).__name__
         self.sent.append((name, getattr(method, "text", None)))
+        markup = getattr(method, "reply_markup", None)
+        keyboard = getattr(markup, "keyboard", None)
+        if keyboard is not None:
+            self.last_buttons = [button.text for row in keyboard for button in row]
         if name in {"SendMessage", "EditMessageText", "EditMessageReplyMarkup", "SendDocument"}:
             chat_id = int(getattr(method, "chat_id", 7))
             return types.Message(
@@ -276,7 +284,7 @@ async def test_legacy_flows(h: Harness) -> None:
     uid = new_user()
     mark = h.mark()
     await h.say(uid, "/start")
-    check("старт: меню показана", "Что записываем" in h.last(mark), h.last(mark))
+    check("старт: меню показана", "Что сделаем" in h.last(mark), h.last(mark))
 
     mark = h.mark()
     await h.say(uid, WEIGHT)
@@ -638,6 +646,43 @@ async def test_migration_from_legacy_db() -> None:
                 path.unlink(missing_ok=True)
 
 
+async def test_sections(h: Harness) -> None:
+    """Главное меню — два раздела, внутри — действия, «Назад» возвращает."""
+    print("\n— структура меню")
+
+    uid = new_user()
+
+    await h.say(uid, "/start")
+    check("главное меню: ровно два раздела",
+          sorted(h.session.last_buttons) == sorted([RECORD, VIEW]), str(h.session.last_buttons))
+
+    await h.say(uid, RECORD)
+    check("«Записать» открывает свои действия",
+          set(h.session.last_buttons) == {WEIGHT, MEALS, TRAINING, SLEEP, WORK, BACK},
+          str(h.session.last_buttons))
+
+    await h.say(uid, VIEW)
+    check("«Смотреть» открывает свои действия",
+          set(h.session.last_buttons) == {TODAY, PAYOUT, REPORT, BACK}, str(h.session.last_buttons))
+
+    await h.say(uid, BACK)
+    check("«Назад» возвращает в главное меню",
+          sorted(h.session.last_buttons) == sorted([RECORD, VIEW]), str(h.session.last_buttons))
+
+    # из середины ввода веса раздел открывается, а ввод сбрасывается
+    await h.say(uid, WEIGHT)
+    await h.say(uid, VIEW)
+    await h.say(uid, "81")
+    check("после перехода число не записано",
+          db_count("SELECT COUNT(*) FROM users WHERE user_id=?", (uid,)) == 0)
+
+    # кнопки из «Записать» работают прямо из «Смотреть»
+    mark = h.mark()
+    await h.say(uid, TODAY)
+    check("действие из другого раздела работает", "Данные за" in h.last(mark) or "Сегодня" in h.last(mark),
+          h.last(mark)[:120])
+
+
 async def test_access(h: Harness) -> None:
     """Посторонний не получает ответа и ничего не пишет; владелец работает."""
     print("\n— доступ: только владелец")
@@ -657,7 +702,7 @@ async def test_access(h: Harness) -> None:
     owner = new_user()
     mark = h.mark()
     await h.say(owner, "/start")
-    check("владелец получает меню", "Что записываем" in h.last(mark), h.last(mark))
+    check("владелец получает меню", "Что сделаем" in h.last(mark), h.last(mark))
 
 
 async def main() -> int:
@@ -669,6 +714,7 @@ async def main() -> int:
     h = Harness()
 
     await test_access(h)
+    await test_sections(h)
     await test_parsers()
     await test_legacy_flows(h)
     await test_work_entry(h)
