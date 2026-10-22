@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    container_name: trainapp-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Базу пишем в volume, а не в образ — данные не теряются при деплое.
+      DB_PATH: /data/training_bot.db
+    volumes:
+      - bot-data:/data
+
+volumes:
+  bot-data:

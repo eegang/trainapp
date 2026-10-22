@@ -1,0 +1,10 @@
+.git
+.gitignore
+__pycache__
+*.db
+*.db.bak
+*.bak
+.env
+bot.log
+tests
+*.md
