@@ -5,10 +5,10 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Базу пишем в volume, а не в образ — данные не теряются при деплое.
-      DB_PATH: /data/training_bot.db
+      # Базу пишем в volume (/app/data), а не в образ — данные не теряются при деплое.
+      DB_PATH: /app/data/training_bot.db
     volumes:
-      - bot-data:/data
+      - bot-data:/app/data
 
 volumes:
   bot-data:
